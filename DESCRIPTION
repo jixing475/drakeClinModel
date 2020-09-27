@@ -1,0 +1,14 @@
+Package: drakeClinModel
+Title: An interpretable mortality prediction model for 
+ COVID-19 patients
+Version: 0.0.0.9000
+Authors@R: person('Jixing', 'Liu', email = 'jixing475@163.com', role = c('cre', 'aut'))
+Description: An interpretable mortality prediction model for COVID-19 patients.
+License: MIT + file LICENSE
+Imports: 
+    config,
+    golem,
+    shiny
+Encoding: UTF-8
+LazyData: true
+RoxygenNote: 6.1.1
