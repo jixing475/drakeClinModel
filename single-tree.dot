@@ -1,0 +1,35 @@
+digraph {
+    graph [ rankdir=TB ]
+
+    0 [ label="乳酸脱氢酶<342" ]
+    0 -> 1 [label="yes, missing" color="#0000FF"]
+    0 -> 2 [label="no" color="#FF0000"]
+
+    1 [ label="淋巴细胞(%)<5.64999962" ]
+    1 -> 3 [label="yes, missing" color="#0000FF"]
+    1 -> 4 [label="no" color="#FF0000"]
+
+    3 [ label="乳酸脱氢酶<248" ]
+    3 -> 7 [label="yes, missing" color="#0000FF"]
+    3 -> 8 [label="no" color="#FF0000"]
+
+    7 [ label="leaf=0.0666666701" ]
+
+    8 [ label="leaf=0.200000018" ]
+
+    4 [ label="超敏C反应蛋白<46.0999985" ]
+    4 -> 9 [label="yes, missing" color="#0000FF"]
+    4 -> 10 [label="no" color="#FF0000"]
+
+    9 [ label="leaf=-0.581102371" ]
+
+    10 [ label="leaf=-0.230769247" ]
+
+    2 [ label="超敏C反应蛋白<19.3500004" ]
+    2 -> 5 [label="yes, missing" color="#0000FF"]
+    2 -> 6 [label="no" color="#FF0000"]
+
+    5 [ label="leaf=0.120000005" ]
+
+    6 [ label="leaf=0.566972494" ]
+}

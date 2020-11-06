@@ -1,0 +1,492 @@
+---
+title: "Untitled"
+author: "Jixing Liu"
+date: "`r format(Sys.Date(), '%Y-%m-%d')`"
+output:
+  html_notebook:
+    theme: united
+    highlight: zenburn
+    toc: true
+    toc_float:
+      toc_collapsed: true
+    toc_depth: 3
+    number_sections: true
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+    echo = TRUE,      # Output code chunks
+    message = TRUE,  # Toggle off message output 
+    warning = TRUE,    # Toggle off warning output
+    fig.width = 6, fig.asp = 0.618, out.width = "70%", fig.align = "center") 
+
+knitr::opts_knit$set(root.dir = usethis::proj_path())
+#library(docknitr)
+
+# libraries used in report
+library(knitr)
+library(kableExtra)
+library(tidyverse)
+
+# Globql formatting options
+options(digits = 3)
+
+# Global table settings 
+options(DT.options = list(pageLength = 10, 
+                          language = list(search = 'Filter:'), 
+                          scrollX = TRUE))
+# Global ggplot settings
+theme_set(theme_light(base_family = "Avenir"))
+```
+
+
+## conda 创建 python 运行环境
+```{bash eval=FALSE, include=TRUE}
+conda create -n clinModel -y python==3.7
+conda activate clinModel
+
+conda install pandas matplotlib numpy scikit-learn xgboost  seaborn
+conda install xlrd
+
+#pip3 install graphviz
+conda install graphviz
+```
+
+
+## 设置 reticulate python 
+```{r set python}
+library(reticulate)
+reticulate::use_python("/Users/zero/anaconda3/envs/clinModel/bin/python", required = TRUE)
+reticulate::py_config()
+# knitr::knit_engines$set(python = reticulate::eng_python) 这个设置反而会造成 chunk 之间的 R 和 python 的变量没能互通
+```
+
+![](https://tva1.sinaimg.cn/large/007S8ZIlgy1gj4x2lg6lgj31cq0ioadz.jpg)
+
+## 🐍 模块调用
+
+```{python}
+# -- coding:utf-8 --
+import pandas as pd
+import numpy as np
+import os
+from os.path import join as pjoin
+
+# from utils import is_number
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+import warnings
+
+import xgboost as xgb
+from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import f1_score
+from matplotlib import pyplot as plt
+from matplotlib.colors import ListedColormap
+
+from sklearn import metrics
+from sklearn.metrics import classification_report
+from sklearn import preprocessing
+
+from mpl_toolkits.mplot3d import Axes3D
+# import utils
+from sklearn.metrics import roc_auc_score
+from sklearn.metrics import roc_curve, auc
+import matplotlib as mpl
+
+warnings.filterwarnings('ignore')
+#%matplotlib inline
+sns.set_style("white")
+
+plt.rcParams['font.sans-serif']=['Simhei']
+plt.rcParams['axes.unicode_minus']=False
+
+```
+
+```{python}
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, confusion_matrix
+from sklearn import metrics
+from sklearn.metrics import f1_score
+from sklearn.metrics import matthews_corrcoef
+from sklearn.model_selection import KFold, StratifiedKFold, cross_val_score 
+
+from sklearn.naive_bayes import BernoulliNB
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.svm import LinearSVC
+```
+
+## 🐍 变量设置
+
+```{python}
+RANDOM_STATE = 123
+CV = 5
+```
+
+## 🐍 自定义函数
+
+### StratifiedKFold_func_with_features_sel
+
+这个函数的作用主要是用 K折的办法算一些指标  
+
+输入: X, y(特征和目标)  
+
+输出: 指标的平均值和标准差
+
+```{python}
+def StratifiedKFold_func_with_features_sel(x, y,Num_iter=100,score_type = 'auc'):
+    # 分层 K 折交叉验证
+    acc_v = []
+    acc_t = []
+    # 每次K折100次！
+    for i in range(Num_iter):
+        # 每次折是随机的random_state=i
+        skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=i)
+        for tr_idx, te_idx in skf.split(x,y):
+            x_tr = x[tr_idx, :]
+            y_tr = y[tr_idx]
+            x_te = x[te_idx, :]
+            y_te = y[te_idx]
+            #定义模型超参数
+            model = xgb.XGBClassifier(max_depth=4,learning_rate=0.2,reg_alpha=1)
+            #模型拟合
+            model.fit(x_tr, y_tr)
+            pred = model.predict(x_te)
+            train_pred = model.predict(x_tr)
+            #调用sklearn 的roc_auc_score 与f1_score计算相关指标
+            # 1. accuracy_score
+            # 2. recall_score
+            # 3. f1_score
+            # 4. roc_auc_score
+            ## 注明L此处用预测的标签值而不是预测概率求的AUC,原因是因为本文着重考虑预测区分生死，运用预测标签相当于在阈值确定为0.5的情况下模型的结果验证，
+            ## 其AUC阈值分割点可视为分别在1，0.5，0, 这样更能反应特征的区分性能的差异性，找出能有区分度贡献的特征。
+            if score_type == 'auc':
+                acc_v.append(roc_auc_score(y_te, pred))
+                acc_t.append(roc_auc_score(y_tr, train_pred))
+            else:
+                acc_v.append(f1_score(y_te, pred))
+                acc_t.append(f1_score(y_tr, train_pred))    
+    # 返回平均值
+    return [np.mean(acc_t), np.mean(acc_v), np.std(acc_t), np.std(acc_v)]
+```
+
+### show_confusion_matrix
+```{python}
+## Plot functions
+######################
+def show_confusion_matrix(validations, predictions):
+    LABELS = ['Survival','Death']
+    matrix = metrics.confusion_matrix(validations, predictions)
+    # plt.figure(dpi=400,figsize=(4.5, 3))
+    plt.figure(figsize=(4.5, 3))
+    sns.heatmap(matrix,
+                cmap='coolwarm',
+                linecolor='white',
+                linewidths=1,
+                xticklabels=LABELS,
+                yticklabels=LABELS,
+                annot=True,
+                fmt='d')
+    plt.title('Confusion Matrix')
+    plt.ylabel('True Label')
+    plt.xlabel('Predicted Label')
+    plt.show()
+
+```
+
+
+
+## 数据整理
+
+可以是一个脚本, 最好是结合 drake 一起使用
+
+
+## 数据加载: X , y
+
+这里面的数 X, y 是数据框
+
+```{r}
+train <- rio::import("analysis/data/raw_data/jixing/train_357.csv")
+validation <- rio::import("analysis/data/raw_data/jixing/validation_110.csv")
+
+train_X <- select(train, -"label") 
+train_Y  <- select(train, "label") 
+
+```
+
+
+
+## MRMR: 特征重要性排序
+
+特征排序矩阵, 跟 MRMR的功能差不多, 在数据量比较小的时候
+
+定义计算特征重要性的函数
+
+```{python}
+def features_rank(X, y):
+  # 构建一个dataframe用于存储特征的重要程度信息
+  import_feature = pd.DataFrame()
+  import_feature['col'] = X.columns.tolist()
+  import_feature['model'] = 0
+  # 重复100次试验
+  for i in range(100): # 50,150
+      #每次试验将375数据随机划分0.7训练集和0.3测试集，注意随机random_state=i
+      ## 注明：此方法原因是由于可获得的样本量较少，为了产生不同的训练样本集，使得特征的重要度排序更为稳定，从而选择了这样一种方式。
+      ## 通过每次不同的随机种子产生不同的样本，从而达到一定程度上的抑制少量样本的异常对特征的重要度带来的影响。
+      x_train, x_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=i)
+      #定义模型超参数
+      model = xgb.XGBClassifier(
+              max_depth=4
+              ,learning_rate=0.2
+              ,reg_lambda=1
+              ,n_estimators=150
+              ,subsample = 0.9
+              ,colsample_bytree = 0.9)
+      #模型拟合
+      model.fit(x_train, y_train)
+      #累加特征重要程度
+      import_feature['model'] = import_feature['model'] + model.feature_importances_/100
+  # 按照特征重要程度，降序排列
+  return import_feature
+```
+
+特征重要性排序数据表计算
+
+```{python}
+feature_rank_res = features_rank(r.train_X, r.train_Y)
+```
+
+```{r}
+py$feature_rank_res %>% view()
+```
+
+前 10 最重要的特征
+```{r}
+# 获取前10重要特征的重要性数值
+(import_feature_cols <- 
+  py$feature_rank_res %>% 
+  arrange(desc(model)) %>% 
+  head(10) %>% 
+  pull(col)
+ )
+```
+
+## IFS: 确定重要特征子集
+
+自定义 IFS 函数:
+
+1. 这里不是 LOOCV 而是 五折
+2. 每个子特征集, 都是重复100 次五折交叉
+3. 这里面的衡量指标可以改变
+
+
+```{python}
+def IFS_K_fold(import_feature_cols, X, y):
+  # 定义四个指标收集器, 后续合并成 dataframe
+  acc_train = [None] * 10
+  acc_val = [None] * 10
+  acc_train_std = [None] * 10
+  acc_val_std = [None] * 10
+  # 五折版的 IFS
+  for num_i in range(0, len(import_feature_cols)):
+    print(num_i)
+    # 按重要程度顺序取特种
+    x_col = import_feature_cols[:num_i + 1]
+    print(x_col)
+    X_select = X[x_col]#.values
+    ## 交叉验证
+    print('5-Fold CV:')
+    acc_train[num_i], acc_val[num_i], acc_train_std[num_i], acc_val_std[num_i] = StratifiedKFold_func_with_features_sel(X_select.values, y.values)
+    
+  res = pd.DataFrame(
+      {'acc_train': acc_train,
+       'acc_val': acc_val,
+       'acc_train_std': acc_train_std,
+       'acc_val_std': acc_val_std
+      })
+  return res
+
+```
+
+```{python}
+# 画特征金字塔
+import_feature_cols = r.import_feature_cols
+
+IFS_res = IFS_K_fold(import_feature_cols, r.train_X, r.train_y)
+
+```
+
+```{r}
+py$IFS_res %>% view()
+```
+
+
+
+
+## 决策树模型
+
+选取前 3 重要的特征
+
+```{r}
+cols <- c('乳酸脱氢酶', '淋巴细胞(%)', '超敏C反应蛋白')
+
+train_x <- select(train, all_of(cols)) 
+train_y  <- select(train, "label") 
+
+validation_x <- select(validation, all_of(cols)) 
+validation_y  <- select(validation, "出院方式") 
+```
+
+```{python}
+
+# 在351病人上划分训练集和验证集，此时110视为测试集
+X_train, X_test, y_train, y_test = train_test_split(r.train_x, r.train_y, test_size=0.3, random_state=6)
+#限定单树xgb模型
+model = xgb.XGBClassifier(
+    max_depth=3,
+    n_estimators=1,
+)
+model.fit(X_train,y_train)
+
+#训练集混淆矩阵
+pred_train = model.predict(X_train)
+show_confusion_matrix(y_train, pred_train)
+print(classification_report(y_train, pred_train))
+
+#测试集混淆矩阵
+pred_test = model.predict(X_test)
+show_confusion_matrix(y_test, pred_test)
+print(classification_report(y_test, pred_test))
+    
+#外部集混淆矩阵
+pred_test = model.predict(r.validation_x)
+print('True test label:',r.validation_y)
+print('Predict test label:',pred_test.astype('int32'))
+show_confusion_matrix(r.validation_y, pred_test)
+print(classification_report(r.validation_y, pred_test))
+    
+plt.figure(dpi=300,figsize=(8,6))
+plot_tree(model)
+plt.show()
+    
+graph = xgb.to_graphviz(model)
+graph.render(filename='analysis/data/derived_data/single-tree.dot')
+#单树可视化
+def ceate_feature_map(features):
+    outfile = open('xgb.fmap', 'w')
+    i = 0
+    for feat in features:
+        outfile.write('{0}\t{1}\tq\n'.format(i, feat))
+        i = i + 1
+    outfile.close()
+
+ceate_feature_map(r.cols)
+graph = xgb.to_graphviz(model, fmap='xgb.fmap', num_trees=0, **{'size': str(10)})
+graph.render(filename='single-tree.dot')
+
+```
+
+## 模型之间的比较
+
+也可以用 pycaret 来试试
+
+```{python}
+features = r.train_x
+labels = r.train_y
+```
+
+
+### 模型选择
+
+```{python}
+#------------------------------------------------
+# model select training 没有 DNN
+#------------------------------------------------
+import sklearn
+sorted(sklearn.metrics.SCORERS.keys())
+
+models = [
+    RandomForestClassifier(random_state=RANDOM_STATE),
+    LinearSVC(random_state=RANDOM_STATE),
+    BernoulliNB(),
+    LogisticRegression(random_state=RANDOM_STATE),
+]
+
+```
+
+### accuracy
+```{python}
+# accuracy -----------------------------------------------------------
+cv_df = pd.DataFrame(index=range(CV * len(models)))
+entries = []
+for model in models:
+  model_name = model.__class__.__name__
+  scores = cross_val_score(model, features, labels, scoring='accuracy', cv=CV)
+  for fold_idx, score in enumerate(scores):
+    entries.append((model_name, fold_idx, score))
+cv_df = pd.DataFrame(entries, columns=['model_name', 'fold_idx', 'accuracy'])
+
+#fig, ax = plt.subplots(figsize=(10,10))
+#sns.boxplot(x='model_name', y='accuracy', data=cv_df)
+#sns.stripplot(x='model_name', y='accuracy', data=cv_df, 
+#              size=8, jitter=True, edgecolor="gray", linewidth=2)
+#plt.show()
+
+cv_df.groupby('model_name').accuracy.mean()
+accuracy_cv_df = cv_df
+```
+### MCC
+
+```{python}
+# MCC -----------------------------------------------------------
+from sklearn.metrics import matthews_corrcoef, make_scorer
+MCC = make_scorer(matthews_corrcoef)
+
+cv_df = pd.DataFrame(index=range(CV * len(models)))
+entries = []
+for model in models:
+  model_name = model.__class__.__name__
+  scores = cross_val_score(model, features, labels, scoring=MCC, cv=CV)
+  for fold_idx, score in enumerate(scores):
+    entries.append((model_name, fold_idx, score))
+cv_df = pd.DataFrame(entries, columns=['model_name', 'fold_idx', 'MCC'])
+
+#fig, ax = plt.subplots(figsize=(10,10))
+#sns.boxplot(x='model_name', y='MCC', data=cv_df)
+#sns.stripplot(x='model_name', y='MCC', data=cv_df, 
+#              size=8, jitter=True, edgecolor="gray", linewidth=2)
+#plt.show()
+
+cv_df.groupby('model_name').MCC.mean()
+MCC_cv_df = cv_df
+```
+
+合并之后用于画图
+
+```{r}
+cv_5_models_metrics <- 
+bind_rows(py$accuracy_cv_df, py$MCC_cv_df) %>% 
+  pivot_longer(cols = -c("model_name", "fold_idx"),
+               names_to = "metrics",
+               values_to = "value") %>% 
+  filter(!is.na(value)) 
+```
+
+
+```{r}
+cv_5_models_metrics %>%
+  #filter(metrics == "accuracy") %>%
+  ggplot(data = .) +
+  aes(x = model_name, y = value, fill = model_name) +
+  geom_boxplot(outlier.alpha = 0) +
+  geom_dotplot(binaxis='y', stackdir='center',
+               position=position_jitterdodge(0.2)) +
+  facet_wrap(~ metrics) +
+  theme_minimal() + 
+  ggthemes::scale_color_tableau() + ggthemes::scale_fill_tableau() 
+```
+
+

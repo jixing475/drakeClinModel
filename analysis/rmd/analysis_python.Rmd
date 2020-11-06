@@ -1,0 +1,2062 @@
+---
+title: "Untitled"
+author: "Jixing Liu"
+date: "`r format(Sys.Date(), '%Y-%m-%d')`"
+output:
+  html_notebook:
+    theme: united
+    highlight: zenburn
+    toc: true
+    toc_float:
+      toc_collapsed: true
+    toc_depth: 3
+    number_sections: true
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+    echo = TRUE,      # Output code chunks
+    message = TRUE,  # Toggle off message output 
+    warning = TRUE,    # Toggle off warning output
+    fig.width = 6, fig.asp = 0.618, out.width = "70%", fig.align = "center") 
+
+knitr::opts_knit$set(root.dir = usethis::proj_path())
+#library(docknitr)
+
+# libraries used in report
+library(knitr)
+library(kableExtra)
+library(tidyverse)
+
+# Globql formatting options
+options(digits = 3)
+
+# Global table settings 
+options(DT.options = list(pageLength = 10, 
+                          language = list(search = 'Filter:'), 
+                          scrollX = TRUE))
+# Global ggplot settings
+theme_set(theme_light(base_family = "Avenir"))
+```
+
+
+## conda env
+```{bash eval=FALSE, include=TRUE}
+conda create -n clinModel -y python==3.6 
+conda activate clinModel
+
+conda install pandas matplotlib=3.2 numpy scikit-learn xgboost  seaborn
+
+
+```
+
+
+
+```{r set python}
+library(reticulate)
+reticulate::use_python("/Users/zero/anaconda3/envs/reticulate/bin/python3", required = TRUE)
+reticulate::py_config()
+# knitr::knit_engines$set(python = reticulate::eng_python) 这个设置反而会造成 chunk 之间的 R 和 python 的变量没能互通
+```
+
+![](https://tva1.sinaimg.cn/large/007S8ZIlgy1gj4x2lg6lgj31cq0ioadz.jpg)
+
+
+## fun
+
+### utils setup
+```{python}
+# -- coding:utf-8 --
+import os
+from os.path import join as pjoin
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+plt.rcParams['font.sans-serif'] = ['SimHei']
+plt.rcParams['axes.unicode_minus'] = False
+
+from sklearn.metrics import confusion_matrix, accuracy_score, f1_score, classification_report
+
+```
+
+### utils_features_selection: setup
+```{python}
+# -- coding:utf-8 --
+import pandas as pd
+import numpy as np
+import os
+from os.path import join as pjoin
+
+# from utils import is_number
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+import warnings
+
+import xgboost as xgb
+from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import f1_score
+from matplotlib import pyplot as plt
+from matplotlib.colors import ListedColormap
+
+from sklearn import metrics
+from sklearn.metrics import classification_report
+from sklearn import preprocessing
+
+from mpl_toolkits.mplot3d import Axes3D
+import utils
+from sklearn.metrics import roc_auc_score
+from sklearn.metrics import roc_curve, auc
+import matplotlib as mpl
+
+warnings.filterwarnings('ignore')
+#%matplotlib inline
+sns.set_style("white")
+
+plt.rcParams['font.sans-serif']=['Simhei']
+plt.rcParams['axes.unicode_minus']=False
+
+```
+
+### Main_of_features_selection: setup
+
+```{python}
+# -- coding:utf-8 --
+import pandas as pd
+import numpy as np
+
+#from utils_features_selection import *
+# 自定义的所有函数
+
+from xgboost import plot_tree
+
+from sklearn import linear_model
+from sklearn.ensemble import RandomForestClassifier
+from sklearn import tree
+
+```
+
+
+
+### 常用参数
+```{python}
+# 常用参数
+top3_feats_cols = ['乳酸脱氢酶', '超敏C反应蛋白', '淋巴细胞(%)']
+in_out_time_cols = ['入院时间', '出院时间']
+path_train = 'analysis/data/raw_data/time_series_375_prerpocess.xlsx'
+path_test = 'analysis/data/raw_data/time_series_test_110_preprocess.xlsx'
+```
+
+### fun: is_number
+
+```{python}
+def is_number(s):
+    if s is None:
+        s = np.nan
+
+    try:
+        float(s)
+        return True
+    except ValueError:
+        pass
+
+    try:
+        import unicodedata
+        unicodedata.numeric(s)
+        return True
+    except (TypeError, ValueError):
+        pass
+
+    return False
+```
+
+### read_train_data
+```{python}
+################################
+## Read data functions
+###############################
+def read_train_data(path_train):
+    data_df = pd.read_excel(path_train, index_col=[0, 1])  # train_sample_375_v2 train_sample_351_v4
+    data_df = data_df.groupby('PATIENT_ID').last()
+    # data_df = data_df.iloc[:,1:]
+    # data_df = data_df.set_index(['PATIENT_ID'])
+    # data_df['年龄'] = data_df['年龄'].apply(lambda x: x.replace('岁', '') if is_number(x.replace('岁', '')) else np.nan).astype(float)
+    # data_df['性别'] = data_df['性别'].map({'男': 1, '女': 2})
+    # data_df['护理->出院方式'] = data_df['护理->出院方式'].map({'治愈': 0,'好转': 0, '死亡': 1})
+    lable = data_df['出院方式'].values
+    data_df = data_df.drop(['出院方式', '入院时间', '出院时间'], axis=1)
+    data_df['Type2'] = lable
+    data_df = data_df.applymap(lambda x: x.replace('>', '').replace('<', '') if isinstance(x, str) else x)
+    data_df = data_df.applymap(lambda x: x if is_number(x) else -1)
+    # data_df = data_df.loc[:, data_df.isnull().mean() < 0.2]
+    data_df = data_df.astype(float)
+
+    return data_df
+
+# df = read_train_data(path_train)
+```
+
+```{r}
+# View(py$df)
+```
+
+### merge_data_by_sliding_window
+```{python}
+def merge_data_by_sliding_window(data, n_days=1, dropna=True, subset=None, time_form='diff'):
+    """滑窗合并数据
+
+    :param data: 时间序列数据，一级行索引为 PATIENT_ID, 二级行索引为 RE_DATE
+    :param n_days: 窗口长度
+    :param dropna: 滑窗合并后还缺失的是否删掉
+    :param subset: pd.DataFrame().dropna() 参数                                                   Note: 新参数!
+    :param time_form: 返回数据的时间索引，'diff' or 'timestamp'
+    :return: 合并后的数据，一级行索引为 PATIENT_ID, 二级行索引为 t_diff or RE_DATE, 取决于"time_form"
+    """
+    #根据PATIENT_ID排序
+    data = data.reset_index(level=1)
+    # dt.normalize() 取出院时间的天数
+    # 距离出院时长        Note: 去掉了出院时间和检测时间的时分秒，因为我觉得以 00:00:00 为分界点更合适
+    t_diff = data['出院时间'].dt.normalize() - data['RE_DATE'].dt.normalize()
+    # 滑窗取整的依据。即nn_days天内的会取整成为同一个数值，后面通过groupby方法分组
+    data['t_diff'] = t_diff.dt.days.values // n_days * n_days
+    #
+    data = data.set_index('t_diff', append=True)
+
+    # 滑窗合并。对['PATIENT_ID', 't_diff']groupby，相当于双循环。遍历所有病人与病人的所有窗口
+    # 因为之前对data排序，因此每个病人t_diff会是从大到小的排序,ffill()是向上一行插值，因此相当于是向旧日期插值
+    # last()是每一组取最后一行，因此即取每个病人对应窗口的最后一次数据，（也一定是最全的）。
+    # last(）自带排序。取完last后会按照索引升序排列
+    data = (
+        data
+        .groupby(['PATIENT_ID', 't_diff']).ffill()
+        .groupby(['PATIENT_ID', 't_diff']).last()
+    )
+    # 去掉缺失样本
+    if dropna:
+        data = data.dropna(subset=subset)         # Note: 这里对缺失值进行了 dropna(), 而不是 fillna(-1)
+
+    # 更新二级索引。（其实timestamp在本论文的中没用到）
+    if time_form == 'timestamp':
+        data = (
+            data
+            .reset_index(level=1, drop=True)
+            .set_index('RE_DATE', append=True)
+        )
+    elif time_form == 'diff':
+        data = data.drop(columns=['RE_DATE'])
+
+    return data
+```
+
+
+### data_preprocess
+
+```{python}
+def data_preprocess(path_train, path_test):
+    #path_train = './data/time_series_375_prerpocess.xlsx'  # to_ml
+    data_df_unna = read_train_data(path_train)
+
+    # data_pre_df = pd.read_csv('./data/sample29_v3.csv',encoding='gbk')
+    data_pre_df = pd.read_excel(path_test, index_col=[0, 1])
+    data_pre_df = merge_data_by_sliding_window(data_pre_df, n_days=1, dropna=True, subset=top3_feats_cols,
+                                                     time_form='diff')
+    data_pre_df = data_pre_df.groupby('PATIENT_ID').first().reset_index()
+    data_pre_df = data_pre_df.applymap(lambda x: x.replace('>', '').replace('<', '') if isinstance(x, str) else x)
+    data_pre_df = data_pre_df.drop_duplicates()
+
+    return data_df_unna, data_pre_df
+```
+
+### calculate miss values by col
+```{python}
+## calculate miss values by col
+def col_miss(train_df):
+    col_missing_df = train_df.isnull().sum(axis=0).reset_index()
+    col_missing_df.columns = ['col','missing_count']
+    col_missing_df = col_missing_df.sort_values(by='missing_count')
+    return col_missing_df
+```
+
+### Data read and split
+
+```{python}
+def data_read_and_split(is_dropna=False,sub_cols=None):
+    # data_df_unna为375数据集，data_pre_df为110数据集
+    data_df_unna,data_pre_df = data_preprocess(path_train, path_test)
+    if is_dropna==True:
+        data_df_unna = data_df_unna.dropna(subset=sub_cols,how='any')
+
+    # 计算特征的缺失情况
+    col_miss_data = col_miss(data_df_unna)
+    # 计算特征缺失比例
+    col_miss_data['Missing_part'] = col_miss_data['missing_count']/len(data_df_unna)
+    # 选择缺失少于0.2的特征
+    sel_cols = col_miss_data[col_miss_data['Missing_part']<=0.2]['col']
+    # copy函数将选择的特征数据摘出来，不影响原数据的数值
+    data_df_sel = data_df_unna[sel_cols].copy()
+    # 计算所有特征
+    cols = list(data_df_sel.columns)
+    # 剔除年龄和性别
+    cols.remove('年龄')
+    cols.remove('性别')
+    cols.remove('Type2')
+    cols.append('Type2')
+    # 构造剔除上述特征的dataframe
+    data_df_sel2 = data_df_sel[cols]
+    # 新建一个dataframe
+    data_df_unna = pd.DataFrame()
+    # 类似copy方法，新建变量，修改不会影响原数值
+    data_df_unna = data_df_sel2
+
+    # 对缺失数值添-1
+    data_df_unna = data_df_unna.fillna(-1)
+
+    # 取出特征名，从第一列到倒数第二列
+    x_col = cols[:-1]
+    #print(x_col)
+    # 取出标签名
+    y_col = cols[-1]
+    #取出375特征数据
+    X_data = data_df_unna[x_col]#.values
+    #取出375标签数据
+    Y_data = data_df_unna[y_col]#.values
+
+    return X_data,Y_data,x_col
+
+```
+
+### StratifiedKFold_func_with_features_sel
+```{python}
+def StratifiedKFold_func_with_features_sel(x, y,Num_iter=100,score_type = 'auc'):
+    # 分层 K 折交叉验证
+    acc_v = []
+    acc_t = []
+    # 每次K折100次！
+    for i in range(Num_iter):
+        # 每次折是随机的random_state=i
+        skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=i)
+        for tr_idx, te_idx in skf.split(x,y):
+            x_tr = x[tr_idx, :]
+            y_tr = y[tr_idx]
+            x_te = x[te_idx, :]
+            y_te = y[te_idx]
+            #定义模型超参数
+            model = xgb.XGBClassifier(max_depth=4,learning_rate=0.2,reg_alpha=1)
+            #模型拟合
+            model.fit(x_tr, y_tr)
+            pred = model.predict(x_te)
+            train_pred = model.predict(x_tr)
+            #调用sklearn 的roc_auc_score 与f1_score计算相关指标
+            ## 注明L此处用预测的标签值而不是预测概率求的AUC,原因是因为本文着重考虑预测区分生死，运用预测标签相当于在阈值确定为0.5的情况下模型的结果验证，
+            ## 其AUC阈值分割点可视为分别在1，0.5，0, 这样更能反应特征的区分性能的差异性，找出能有区分度贡献的特征。
+            if score_type == 'auc':
+                acc_v.append(roc_auc_score(y_te, pred))
+                acc_t.append(roc_auc_score(y_tr, train_pred))
+            else:
+                acc_v.append(f1_score(y_te, pred))
+                acc_t.append(f1_score(y_tr, train_pred))    
+    # 返回平均值
+    return [np.mean(acc_t), np.mean(acc_v), np.std(acc_t), np.std(acc_v)]
+```
+
+
+### 📌  features_selection
+
+```{python}
+## features selection part
+def features_selection():
+    ## 读取375的数据
+    X_data_all_features,Y_data,x_col = data_read_and_split()
+    # name_dict = {'乳酸脱氢酶':'Lactate dehydrogenase (LDH)','淋巴细胞(%)':'Lymphocytes(%)','超敏C反应蛋白':'High-sensitivity C-reactive protein (hs-CRP)',
+    #          '钠':'Sodium','氯':'Chlorine','国际标准化比值':'International Normalized Ratio (INR)','嗜酸细胞(#)':'Eosinophils(#)',
+    #          '嗜酸细胞(%)':'Eosinophils(%)','单核细胞(%)':'Monocytes(%)','白蛋白':'Albumin'}
+    #
+    # 构建一个dataframe用于存储特征的重要程度信息
+    import_feature = pd.DataFrame()
+    import_feature['col'] = x_col
+    import_feature['xgb'] = 0
+    # 重复100次试验
+    for i in range(100): # 50,150
+        #每次试验将375数据随机划分0.7训练集和0.3测试集，注意随机random_state=i
+        ## 注明：此方法原因是由于可获得的样本量较少，为了产生不同的训练样本集，使得特征的重要度排序更为稳定，从而选择了这样一种方式。
+        ## 通过每次不同的随机种子产生不同的样本，从而达到一定程度上的抑制少量样本的异常对特征的重要度带来的影响。
+        x_train, x_test, y_train, y_test = train_test_split(X_data_all_features, Y_data, test_size=0.3, random_state=i)
+        #定义模型超参数
+        model = xgb.XGBClassifier(
+                max_depth=4
+                ,learning_rate=0.2
+                ,reg_lambda=1
+                ,n_estimators=150
+                ,subsample = 0.9
+                ,colsample_bytree = 0.9)
+        #模型拟合
+        model.fit(x_train, y_train)
+        #累加特征重要程度
+        import_feature['xgb'] = import_feature['xgb']+model.feature_importances_/100
+    # 按照特征重要程度，降序排列
+    import_feature = import_feature.sort_values(axis=0, ascending=False, by='xgb')
+    print('Top 10 features:')
+    print(import_feature.head(10))
+    # Sort feature importances from GBC model trained earlier
+    # 按照特征重要程度的位置信息
+    indices = np.argsort(import_feature['xgb'].values)[::-1]
+    #获取前10个重要的特征位置
+    Num_f = 10
+    indices = indices[:Num_f]
+    
+    # Visualise these with a barplot
+    # plt.subplots(dpi=400,figsize=(12, 10))
+    plt.subplots(figsize=(12, 10))
+    # g = sns.barplot(y=list(name_dict.values())[:Num_f], x = import_feature.iloc[:Num_f]['xgb'].values[indices], orient='h') #import_feature.iloc[:Num_f]['col'].values[indices]
+    g = sns.barplot(y=import_feature.iloc[:Num_f]['col'].values[indices], 
+                    x = import_feature.iloc[:Num_f]['xgb'].values[indices], 
+                    orient='h') #import_feature.iloc[:Num_f]['col'].values[indices]
+    g.set_xlabel("Relative importance",fontsize=18)
+    g.set_ylabel("Features",fontsize=18)
+    g.tick_params(labelsize=14)
+    sns.despine() 
+    # plt.savefig('feature_importances_v3.png')
+    plt.show()
+    # g.set_title("The mean feature importance of XGB models");
+    # 获取前10重要特征的重要性数值
+    import_feature_cols= import_feature['col'].values[:10]
+
+    # 画特征金字塔
+    num_i = 1
+    val_score_old = 0
+    val_score_new = 0
+    while val_score_new >= val_score_old:
+        val_score_old = val_score_new
+        # 按重要程度顺序取特种
+        x_col = import_feature_cols[:num_i]
+        print(x_col)
+        X_data = X_data_all_features[x_col]#.values
+        ## 交叉验证
+        print('5-Fold CV:')
+        acc_train, acc_val, acc_train_std, acc_val_std = StratifiedKFold_func_with_features_sel(X_data.values,Y_data.values)
+        print("Train AUC-score is %.4f ; Validation AUC-score is %.4f" % (acc_train,acc_val))
+        print("Train AUC-score-std is %.4f ; Validation AUC-score-std is %.4f" % (acc_train_std,acc_val_std))
+        val_score_new = acc_val
+        num_i += 1
+        
+    print('Selected features:',x_col[:-1])
+    
+    return list(x_col[:-1])
+```
+
+
+```{python}
+res = features_selection()
+```
+
+
+```{r}
+View(py$res)
+```
+
+
+### show_confusion_matrix
+```{python}
+## Plot functions
+######################
+def show_confusion_matrix(validations, predictions):
+    LABELS = ['Survival','Death']
+    matrix = metrics.confusion_matrix(validations, predictions)
+    # plt.figure(dpi=400,figsize=(4.5, 3))
+    plt.figure(figsize=(4.5, 3))
+    sns.heatmap(matrix,
+                cmap='coolwarm',
+                linecolor='white',
+                linewidths=1,
+                xticklabels=LABELS,
+                yticklabels=LABELS,
+                annot=True,
+                fmt='d')
+    plt.title('Confusion Matrix')
+    plt.ylabel('True Label')
+    plt.xlabel('Predicted Label')
+    plt.show()
+
+```
+
+### 📌  single_tree
+
+```{python}
+def single_tree(cols=['乳酸脱氢酶','淋巴细胞(%)','超敏C反应蛋白']):
+    print('single_tree:\n')
+    #获取375病人（data_df_unna） 和110病人（data_pre_df）数据
+    data_df_unna,data_pre_df = data_preprocess(path_train, path_test)
+    #去掉全空行，此时375总数目变成351
+    data_df_unna = data_df_unna.dropna(subset=cols,how='any')
+
+    cols.append('Type2')
+    #获取病人的结局标签
+    Tets_Y = data_pre_df.reset_index()[['PATIENT_ID','出院方式']].copy()
+    #修改dataframe的名字
+    Tets_Y = Tets_Y.rename(columns={'PATIENT_ID': 'ID', '出院方式': 'Y'})
+    # 获取110病人的标签数据
+    y_true = Tets_Y['Y'].values
+
+    x_col = cols[:-1]
+    y_col = cols[-1]
+    # 获取351病人的三特征数据
+    x_np = data_df_unna[x_col].values
+    # 获取351病人的标签数据
+    y_np = data_df_unna[y_col].values
+    # 获取110病人的三特征数据
+    x_test = data_pre_df[x_col].values
+    # 在351病人上划分训练集和验证集，此时110视为测试集
+    X_train, X_val, y_train, y_val = train_test_split(x_np, y_np, test_size=0.3, random_state=6)
+    #限定单树xgb模型
+    model = xgb.XGBClassifier(
+        max_depth=3,
+        n_estimators=1,
+    )
+    model.fit(X_train,y_train)
+
+    #训练集混淆矩阵
+    pred_train = model.predict(X_train)
+    show_confusion_matrix(y_train, pred_train)
+    print(classification_report(y_train, pred_train))
+
+    #验证集混淆矩阵
+    pred_val = model.predict(X_val)
+    show_confusion_matrix(y_val, pred_val)
+    print(classification_report(y_val, pred_val))
+    #测试集混淆矩阵
+    
+    pred_test = model.predict(x_test)
+    print('True test label:',y_true)
+    print('Predict test label:',pred_test.astype('int32'))
+    show_confusion_matrix(y_true, pred_test)
+    print(classification_report(y_true, pred_test))
+    
+    plt.figure(dpi=300,figsize=(8,6))
+    plot_tree(model)
+    plt.show()
+    
+    graph = xgb.to_graphviz(model)
+    graph.render(filename='single-tree.dot')
+    #单树可视化
+    #ceate_feature_map(cols[:-1])
+    #graph = xgb.to_graphviz(model, fmap='xgb.fmap', num_trees=0, **{'size': str(10)})
+    #graph.render(filename='single-tree.dot')
+
+```
+
+```{python}
+single_tree()
+```
+
+### plot_roc
+
+```{python}
+def plot_roc(labels, predict_prob,Moodel_name_i,fig,labels_name,k):
+    false_positive_rate,true_positive_rate,thresholds=roc_curve(labels, predict_prob)
+    roc_auc=auc(false_positive_rate, true_positive_rate)
+    #plt.figure()
+    line_list = ['--','-']
+    ax = fig.add_subplot(111)
+    plt.title('ROC', fontsize=20)
+    ax.plot(false_positive_rate, true_positive_rate,line_list[k%2],linewidth=1+(1-k/5),label=Moodel_name_i+' AUC = %0.4f'% roc_auc)
+    plt.xticks(fontsize=20)
+    plt.yticks(fontsize=20)
+    plt.ylabel('TPR', fontsize=20)
+    plt.xlabel('FPR', fontsize=20)
+    labels_name.append(Moodel_name_i+' AUC = %0.4f'% roc_auc)
+    #plt.show()
+    return labels_name
+```
+
+### StratifiedKFold_func
+```{python}
+
+def StratifiedKFold_func(x, y,Num_iter=100,model = xgb.XGBClassifier(max_depth=4,learning_rate=0.2,reg_alpha=1), score_type ='auc'):
+    # 模型在循环外的k折
+    # 分层 K 折交叉验证
+    acc_v = []
+    acc_t = []
+    
+    for i in range(Num_iter):
+        skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=i)
+        for tr_idx, te_idx in skf.split(x,y):
+            x_tr = x[tr_idx, :]
+            y_tr = y[tr_idx]
+            x_te = x[te_idx, :]
+            y_te = y[te_idx]
+
+            model.fit(x_tr, y_tr)
+            pred = model.predict(x_te)
+            train_pred = model.predict(x_tr)
+
+            pred_Proba = model.predict_proba(x_te)[:,1]
+            train_pred_Proba = model.predict_proba(x_tr)[:,1]
+
+            if score_type == 'auc':
+            	acc_v.append(roc_auc_score(y_te, pred_Proba))
+            	acc_t.append(roc_auc_score(y_tr, train_pred_Proba))
+            else:
+            	acc_v.append(f1_score(y_te, pred))
+            	acc_t.append(f1_score(y_tr, train_pred))            	
+
+    return [np.mean(acc_t), np.mean(acc_v), np.std(acc_t), np.std(acc_v)]
+```
+
+### 📌  Compare_with_other_method
+
+```{python}
+def Compare_with_other_method(sub_cols=['乳酸脱氢酶','淋巴细胞(%)','超敏C反应蛋白']):
+    # 读取351数据集（从375中删除sub_cols全为空的样本得到）
+    x_np,y_np,x_col = data_read_and_split(is_dropna=True,sub_cols=sub_cols)
+
+    #为了si的图4说明问题。如果是5折，画不出SI 图4
+    X_train, X_val, y_train, y_val = train_test_split(x_np, y_np, test_size=0.3, random_state=6)
+
+    #定义全特征下的比对方法
+    xgb_n_clf = xgb.XGBClassifier(
+        max_depth=4
+        ,learning_rate=0.2
+        ,reg_lambda=1
+        ,n_estimators=150
+        ,subsample = 0.9
+        ,colsample_bytree = 0.9
+        ,random_state=0)
+    tree_clf = tree.DecisionTreeClassifier(random_state=0,max_depth=4) #random_state=0,之前没加
+    RF_clf1 = RandomForestClassifier(random_state=0,n_estimators=150,max_depth=4,)
+    LR_clf = linear_model.LogisticRegression(random_state=0,C=1,solver='lbfgs')
+    LR_reg_clf = linear_model.LogisticRegression(random_state=0,C=0.1, solver='lbfgs')
+    
+    fig = plt.figure(dpi=400,figsize=(16, 8))
+
+    Num_iter = 100
+    
+    i = 0
+    labels_names = []
+    Moodel_name = ['Multi-tree XGBoost with all features',
+                   'Decision tree with all features',
+                   'Random Forest with all features',
+                   'Logistic regression with all features with regularization parameter = 1 (by default)',
+                   'Logistic regression with all features with regularization parameter = 10',]
+    for model in [xgb_n_clf,tree_clf,RF_clf1,LR_clf,LR_reg_clf]:
+        print('Model:'+Moodel_name[i])
+        #以f1的评价方式来k折
+        acc_train, acc_val, acc_train_std, acc_val_std = StratifiedKFold_func(x_np.values, y_np.values,Num_iter,model, score_type ='f1')
+        #print('F1-score of Train:%.6f with std:%.4f \nF1-score of Validation:%.4f with std:%.6f '%(acc_train,acc_train_std,acc_val,acc_val_std))
+        # 以auc的评价方式来k折
+        acc_train, acc_val, acc_train_std, acc_val_std = StratifiedKFold_func(x_np.values, y_np.values,Num_iter,model, score_type ='auc')
+        print('AUC of Train:%.6f with std:%.4f \nAUC of Validation:%.6f with std:%.4f '%(acc_train,acc_train_std,acc_val,acc_val_std))
+
+        #为了画si图4
+        model.fit(X_train,y_train)
+        pred_train_probe = model.predict_proba(X_train)[:,1]
+        pred_val_probe = model.predict_proba(X_val)[:,1]
+        #plot_roc(y_val, pred_val_probe,Moodel_name[i],fig,labels_names,i) # 为了画si图4中的test
+        plot_roc(y_train, pred_train_probe,Moodel_name[i],fig,labels_names,i) # 为了画si图4 train
+        print('AUC socre:',roc_auc_score(y_val, pred_val_probe))
+        
+        i = i+1
+
+    ## 三特征的单树模型对比
+    x_np_sel = x_np[sub_cols] #选择三特征
+    ## 划分数据集是为了单树的单次训练并生成AUC图，划分方式和之前保存一致。
+    X_train, X_val, y_train, y_val = train_test_split(x_np_sel, y_np, test_size=0.3, random_state=6) 
+
+    #为了三特征的模型对比
+    xgb_clf = xgb.XGBClassifier(
+        max_depth=3,
+        n_estimators=1,
+        random_state=0,
+    )
+    
+    tree_clf = tree.DecisionTreeClassifier(random_state=0,max_depth=3)
+    RF_clf2 = RandomForestClassifier(random_state=0,n_estimators=1,max_depth=3,)
+
+    #i = 0
+    Moodel_name = ['Single-tree XGBoost with three features',
+                   'Decision tree with three features',
+                   'Random Forest with a single tree constraint with three features',]
+    for model in [xgb_clf,tree_clf,RF_clf2]:
+        print('Model'+Moodel_name[i-5])
+        #f1的结果
+        acc_train, acc_val, acc_train_std, acc_val_std = StratifiedKFold_func(x_np_sel.values, y_np.values,Num_iter,model, score_type ='f1')
+        #print('F1-score of Train:%.6f with std:%.4f \nF1-score of Validation:%.4f with std:%.6f '%(acc_train,acc_train_std,acc_val,acc_val_std))
+        #auc的结果
+        acc_train, acc_val, acc_train_std, acc_val_std = StratifiedKFold_func(x_np_sel.values, y_np.values,Num_iter,model, score_type ='auc')
+        print('AUC of Train:%.6f with std:%.4f \nAUC of Validation:%.6f with std:%.4f '%(acc_train,acc_train_std,acc_val,acc_val_std))
+        
+        model.fit(X_train,y_train)
+        pred_train_probe = model.predict_proba(X_train)[:,1]    # 为了画si图4中的train
+        pred_val_probe = model.predict_proba(X_val)[:,1]    # 为了画si图4中的test
+        #plot_roc(y_val, pred_val_probe,Moodel_name[i-5],fig,labels_names,i) # 为了画si图4中的test
+        plot_roc(y_train, pred_train_probe,Moodel_name[i-5],fig,labels_names,i)# 为了画si图4中的train
+        print('AUC socre:',roc_auc_score(y_val, pred_val_probe))
+        
+        i = i+1
+    
+    plt.plot([0,1],[0,1],'r--')
+    plt.legend(loc='SouthEastOutside', fontsize=14)
+    plt.savefig('AUC_train.png')
+    plt.show()
+
+
+```
+
+```{python}
+res
+```
+
+```{python}
+Compare_with_other_method(sub_cols=['乳酸脱氢酶', '淋巴细胞(%)', '超敏C反应蛋白', '钠'])
+```
+
+
+
+## utils
+
+
+### fun: read
+
+> 读取处理后的数据, 可以合并处理 parquet, csv, excel 三种格式文件的读取函数
+
+```{python}
+def read(path: str, usecols=None, is_ts='infer'):
+    """读取处理后的数据
+    合并 parquet, csv, excel 三种格式文件的读取函数
+
+    :param path: 文件路径，必须是 parquet 或 csv 或 excel 文件
+    :param usecols: 选取的列。与 pandas 接口不同，此处进行了简化，无需写索引列
+    :param is_ts: 是否为时间序列。可选值：'infer', True, False
+    :return: 读取的 DateFrame 数据
+    """
+    # 设置索引
+    if is_ts == 'infer':
+        index_col = [0, 1] if os.path.split(path)[1].startswith('time_series') else [0]
+    elif is_ts is True:
+        index_col = [0, 1]
+    elif is_ts is False:
+        index_col = [0]
+    else:
+        raise Exception('is_ts 参数错误')
+
+    # 读取数据
+    if path.endswith('.parquet'):
+        data = pd.read_parquet(path)
+    elif path.endswith('.csv'):
+        try:
+            data = pd.read_csv(path, index_col=index_col, encoding='gb18030')
+        except UnicodeDecodeError:
+            data = pd.read_csv(path, index_col=index_col, encoding='utf-8')
+        except:
+            raise
+    elif path.endswith('.xlsx'):
+        data = pd.read_excel(path, index_col=index_col)
+    else:
+        raise Exception('文件类型错误')
+
+    # 提取指定列
+    if usecols is not None:
+        data = data[usecols]
+
+    return data
+```
+
+### fun: merge_data_by_sliding_window
+
+```{python}
+def merge_data_by_sliding_window(data, n_days=1, dropna=True, subset=None, time_form='diff'):
+    """滑窗合并数据
+
+    :param data: 时间序列数据，一级行索引为 PATIENT_ID, 二级行索引为 RE_DATE
+    :param n_days: 窗口长度
+    :param dropna: 滑窗合并后还缺失的是否删掉
+    :param subset: pd.DataFrame().dropna() 参数                                                   Note: 新参数!
+    :param time_form: 返回数据的时间索引，'diff' or 'timestamp'
+    :return: 合并后的数据，一级行索引为 PATIENT_ID, 二级行索引为 t_diff or RE_DATE, 取决于"time_form"
+    """
+    #根据PATIENT_ID排序
+    data = data.reset_index(level=1)
+    # dt.normalize() 取出院时间的天数
+    # 距离出院时长        Note: 去掉了出院时间和检测时间的时分秒，因为我觉得以 00:00:00 为分界点更合适
+    t_diff = data['出院时间'].dt.normalize() - data['RE_DATE'].dt.normalize()
+    # 滑窗取整的依据。即nn_days天内的会取整成为同一个数值，后面通过groupby方法分组
+    data['t_diff'] = t_diff.dt.days.values // n_days * n_days
+    #
+    data = data.set_index('t_diff', append=True)
+
+    # 滑窗合并。对['PATIENT_ID', 't_diff']groupby，相当于双循环。遍历所有病人与病人的所有窗口
+    # 因为之前对data排序，因此每个病人t_diff会是从大到小的排序,ffill()是向上一行插值，因此相当于是向旧日期插值
+    # last()是每一组取最后一行，因此即取每个病人对应窗口的最后一次数据，（也一定是最全的）。
+    # last(）自带排序。取完last后会按照索引升序排列
+    data = (
+        data
+        .groupby(['PATIENT_ID', 't_diff']).ffill()
+        .groupby(['PATIENT_ID', 't_diff']).last()
+    )
+    # 去掉缺失样本
+    if dropna:
+        data = data.dropna(subset=subset)         # Note: 这里对缺失值进行了 dropna(), 而不是 fillna(-1)
+
+    # 更新二级索引。（其实timestamp在本论文的中没用到）
+    if time_form == 'timestamp':
+        data = (
+            data
+            .reset_index(level=1, drop=True)
+            .set_index('RE_DATE', append=True)
+        )
+    elif time_form == 'diff':
+        data = data.drop(columns=['RE_DATE'])
+
+    return data
+
+```
+
+### fun: score_form
+
+```{python}
+
+def score_form(x: np.array):
+    """打分表预测
+    example: pred, score = score_form(df[['乳酸脱氢酶', '淋巴细胞(%)', '超敏C反应蛋白']].values)
+
+    :param x: 列顺序：['乳酸脱氢酶', '淋巴细胞(%)', '超敏C反应蛋白']
+    :return: 预测类别及最后得分
+    """
+    x = x.copy()
+
+    # 乳酸脱氢酶
+    x[:, 0] = pd.cut(
+        x[:, 0],
+        [-2, 107, 159, 210, 262, 313, 365, 416, 467, 519, 570, 622, 673, 724, 776, 827, 1e5],
+        labels=list(range(-5, 11))
+    )
+
+    # 淋巴细胞(%)
+    x[:, 1] = pd.cut(
+        x[:, 1],
+        [-2, 1.19, 3.12, 5.05, 6.98, 8.91, 10.84, 12.77, 14.7, 16.62, 18.55, 20.48, 22.41, 24.34, 1e5],
+        labels=list(range(8, -6, -1))
+    )
+
+    # 超敏C反应蛋白
+    x[:, 2] = pd.cut(
+        x[:, 2],
+        [-2, 19.85, 41.2, 62.54, 83.88, 1e5],
+        labels=list(range(-1, 4))
+    )
+
+    # 统分
+    total_score = x.sum(axis=1)
+
+    # 1 分为临界点，大于 1 分死亡，小于 1 分治愈
+    pred = (total_score > 1).astype(int)
+    return pred, total_score
+```
+
+### fun: decision_tree
+
+```{python}
+def decision_tree(x: pd.Series):
+    """正文中的决策树
+    example: df.apply(decision_tree, axis=1)
+
+    :param x: 单个样本，['乳酸脱氢酶', '超敏C反应蛋白', '淋巴细胞(%)']
+    :return: 0: 治愈, 1: 死亡
+    """
+    if x['乳酸脱氢酶'] >= 365:
+        return 1
+
+    if x['超敏C反应蛋白'] < 41.2:
+        return 0
+
+    if x['淋巴细胞(%)'] > 14.7:
+        return 0
+    else:
+        return 1
+```
+
+
+### get_time_in_advance_of_predict
+
+```{python}
+def get_time_in_advance_of_predict(data):
+    """提前预测正确的天数
+
+    :param data: 时间序列数据，一级行索引为 PATIENT_ID, 二级行索引为 t_diff
+    :return: pd.Series, index: PATIENT_ID, values: 提前预测正确的天数
+    """
+    # 由于python的机制，用copy新建一个data，不然会修改原dat
+    data = data.copy()
+    # 在data 这个dataframe中新建一列right，数值是判定是否正确
+    data['right'] = data['pred'] == data['出院方式']
+    # 新建一个空列表，用于存储提前预测的正确的天数
+    time_advance = []
+    # data.index.remove_unused_levels().levels[0]表示的是病人id的list，即遍历所有病人
+    for id_ in data.index.remove_unused_levels().levels[0]:
+        # 因为病人id是一级索引，loc方法取出该病人对应的所有数据（可能有多条）
+        d = data.loc[id_]
+        # 如果病人只有一条数据单数据
+        if len(d) == 1:
+            if d.iloc[0]['right']:
+                # 将预测对存入time_advance，分别为病人的id，正确的天数，出院的方式
+                time_advance.append([id_, d.iloc[0].name, d['出院方式'].iat[0]])
+            continue
+
+        # 多数据 Step1: 预测错
+        if not d.iloc[0]['right']:
+            continue
+
+        # 多数据 Step2: 全对
+        if d['right'].all():
+            # 将预测对存入time_advance，分别为病人的id，正确的天数，出院的方式
+            time_advance.append([id_, d.iloc[-1].name, d['出院方式'].iat[0]])
+            continue
+
+        # 多数据 Step3: 部分对
+        for i in range(len(d)):
+            if d.iloc[i]['right']:
+                continue
+            else:
+                # 将预测对存入time_advance，分别为病人的id，正确的天数，出院的方式
+                time_advance.append([id_, d.iloc[i-1].name, d['出院方式'].iat[0]])
+                break
+
+    # 将time_advance存成DataFrame
+    time_advance = pd.DataFrame(time_advance, columns=['PATIENT_ID', 'time_advance', 'outcome'])
+    time_advance = time_advance.set_index('PATIENT_ID')
+    return time_advance
+
+
+class Metrics:
+    def __init__(self, report=None, acc=None, f1=None, conf_mat=None):
+        self.y_trues  = []
+        self.y_preds  = []
+
+        # list or None. 'every': 每折都打印; 'overall': 打印总体的
+        if isinstance(report, list):
+            self.report = report
+        else:
+            self.report = [report]
+
+        if isinstance(acc, list):
+            self.acc = acc
+        else:
+            self.acc = [acc]
+
+        if isinstance(f1, list):
+            self.f1 = f1
+        else:
+            self.f1 = [f1]
+
+        if isinstance(conf_mat, list):
+            self.conf_mat = conf_mat
+        else:
+            self.conf_mat = [conf_mat]
+
+    def record(self, y_true, y_pred):
+        self.y_trues.append(y_true)
+        self.y_preds.append(y_pred)
+        return self
+
+    def clear(self):
+        self.y_trues = []
+        self.y_preds = []
+        return self
+
+    def print_metrics(self):
+        """打印指标
+
+        :param report:
+        :param acc:
+        :param f1:
+        :param conf_mat:
+        :return:
+        """
+        # Loop: 'every'
+        acc_values, f1_values = [], []
+        single_fold = True if len(self.y_trues) == 1 else False
+        for i, (y_true, y_pred) in enumerate(zip(self.y_trues, self.y_preds)):
+            assert (y_true.ndim == 1) and (y_pred.ndim == 1)
+            print(f'\n======================== 第 {i+1} 折指标 ========================>')
+
+            # Classification_report
+            if (self.report is not None) and ('every' in self.report):
+                print(classification_report(y_true, y_pred))
+
+            # Accuracy_score
+            a_v = accuracy_score(y_true, y_pred)
+            acc_values.append(a_v)
+            if (self.acc is not None) and ('every' in self.acc):
+                print(f"accuracy: {a_v:.05f}")
+
+            # F1_score
+            f1_v = f1_score(y_true, y_pred, average='macro')
+            f1_values.append(f1_v)
+            if (self.f1 is not None) and ('every' in self.f1):
+                print(f"F1: {f1_v:.05f}")
+
+            # Confusion_matrix
+            if (self.conf_mat is not None) and ('every' in self.conf_mat):
+                print(f"混淆矩阵：\n{confusion_matrix(y_true, y_pred)}")
+
+        # 'Overall'
+        print('\n======================== 总体指标 ========================>')
+        y_true = np.hstack(self.y_trues)
+        y_pred = np.hstack(self.y_preds)
+
+        # Classification_report
+        if (self.report is not None) and ('overall' in self.report):
+            print(classification_report(y_true, y_pred))
+
+        # Accuracy_score
+        if (self.acc is not None) and ('overall' in self.acc):
+            if single_fold:
+                print(f"accuracy：\t{acc_values[0]: .04f}")
+            else:
+                print(f"accuracy：\t{np.mean(acc_values): .04f} / {'  '.join([str(a_v.round(2)) for a_v in acc_values])}")
+
+        # F1_score
+        if (self.f1 is not None) and ('overall' in self.f1):
+            if single_fold:
+                print(f"F1-score：\t{f1_values[0]: .04f}")
+            else:
+                print(f"F1 均值：\t{np.mean(f1_values): .04f} / {'  '.join([str(f1_v.round(2)) for f1_v in f1_values])}")
+
+        # Confusion_matrix
+        if (self.conf_mat is not None) and ('overall' in self.conf_mat):
+            print(f"混淆矩阵：\n{confusion_matrix(y_true, y_pred)}")
+
+
+```
+
+### fun: feat_zh2en
+
+```{python}
+def feat_zh2en(data):
+    """特征名中文转英文"""
+    feats_zh = data.columns
+
+    # 显示哪些列没有中英翻译
+    feats_map = pd.read_excel('data/raw_data/特征名_zh2en/特征名_zh2en.xlsx', index_col=0)['en']
+    out_of_map = set(feats_zh) - set(feats_map.index)
+    print(f"缺少翻译的特征：{out_of_map}")
+
+    # 开始翻译
+    feats_map = feats_map.to_dict()
+    data = data.rename(columns=feats_map)
+    return data
+
+```
+
+### fun: concat_data
+
+```{python}
+def concat_data(data375: pd.DataFrame, data110: pd.DataFrame):
+    """整合 375 + 110
+    因为 PATIENT_ID 都从 1 开始，所以整合时需要调整，避免重合
+
+    :param data375:
+    :param data110:
+    :return:
+    """
+    data110 = data110.reset_index()
+    data110['PATIENT_ID'] += 375
+    data110 = data110.set_index(['PATIENT_ID', 'RE_DATE'])
+    data = data375.append(data110)
+    return data
+```
+
+
+## utils_features_selection
+
+### utils_features_selection: setup
+```{python}
+# -- coding:utf-8 --
+import pandas as pd
+import numpy as np
+import os
+from os.path import join as pjoin
+
+# from utils import is_number
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+import warnings
+
+import xgboost as xgb
+from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import f1_score
+from matplotlib import pyplot as plt
+from matplotlib.colors import ListedColormap
+
+from sklearn import metrics
+from sklearn.metrics import classification_report
+from sklearn import preprocessing
+
+from mpl_toolkits.mplot3d import Axes3D
+import utils
+from sklearn.metrics import roc_auc_score
+from sklearn.metrics import roc_curve, auc
+import matplotlib as mpl
+
+warnings.filterwarnings('ignore')
+#%matplotlib inline
+sns.set_style("white")
+
+plt.rcParams['font.sans-serif']=['Simhei']
+plt.rcParams['axes.unicode_minus']=False
+
+```
+
+### fun: StratifiedKFold_func_with_features_sel
+```{python}
+
+######################
+## CV functions
+######################
+## AUC and f1 score with CV
+
+def StratifiedKFold_func_with_features_sel(x, y,Num_iter=100,score_type = 'auc'):
+    # 分层 K 折交叉验证
+    acc_v = []
+    acc_t = []
+    # 每次K折100次！
+    for i in range(Num_iter):
+        # 每次折是随机的random_state=i
+        skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=i)
+        for tr_idx, te_idx in skf.split(x,y):
+            x_tr = x[tr_idx, :]
+            y_tr = y[tr_idx]
+            x_te = x[te_idx, :]
+            y_te = y[te_idx]
+            #定义模型超参数
+            model = xgb.XGBClassifier(max_depth=4,learning_rate=0.2,reg_alpha=1)
+            #模型拟合
+            model.fit(x_tr, y_tr)
+            pred = model.predict(x_te)
+            train_pred = model.predict(x_tr)
+            #调用sklearn 的roc_auc_score 与f1_score计算相关指标
+            ## 注明L此处用预测的标签值而不是预测概率求的AUC,原因是因为本文着重考虑预测区分生死，运用预测标签相当于在阈值确定为0.5的情况下模型的结果验证，
+            ## 其AUC阈值分割点可视为分别在1，0.5，0, 这样更能反应特征的区分性能的差异性，找出能有区分度贡献的特征。
+            if score_type == 'auc':
+                acc_v.append(roc_auc_score(y_te, pred))
+                acc_t.append(roc_auc_score(y_tr, train_pred))
+            else:
+                acc_v.append(f1_score(y_te, pred))
+                acc_t.append(f1_score(y_tr, train_pred))    
+    # 返回平均值
+    return [np.mean(acc_t), np.mean(acc_v), np.std(acc_t), np.std(acc_v)]
+
+```
+
+
+### fun: StratifiedKFold_func
+
+```{python}
+def StratifiedKFold_func(x, y,Num_iter=100,model = xgb.XGBClassifier(max_depth=4,learning_rate=0.2,reg_alpha=1), score_type ='auc'):
+    # 模型在循环外的k折
+    # 分层 K 折交叉验证
+    acc_v = []
+    acc_t = []
+    
+    for i in range(Num_iter):
+        skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=i)
+        for tr_idx, te_idx in skf.split(x,y):
+            x_tr = x[tr_idx, :]
+            y_tr = y[tr_idx]
+            x_te = x[te_idx, :]
+            y_te = y[te_idx]
+
+            model.fit(x_tr, y_tr)
+            pred = model.predict(x_te)
+            train_pred = model.predict(x_tr)
+
+            pred_Proba = model.predict_proba(x_te)[:,1]
+            train_pred_Proba = model.predict_proba(x_tr)[:,1]
+
+            if score_type == 'auc':
+            	acc_v.append(roc_auc_score(y_te, pred_Proba))
+            	acc_t.append(roc_auc_score(y_tr, train_pred_Proba))
+            else:
+            	acc_v.append(f1_score(y_te, pred))
+            	acc_t.append(f1_score(y_tr, train_pred))            	
+
+    return [np.mean(acc_t), np.mean(acc_v), np.std(acc_t), np.std(acc_v)]
+
+```
+
+### fun: read_train_data
+
+```{python}
+################################
+## Read data functions
+###############################
+def read_train_data(path_train):
+    #data_df = pd.read_excel(path_train, encoding='gbk', index_col=[0, 1])  
+    data_df = pd.read_excel(path_train, index_col=[0, 1]) # train_sample_375_v2 train_sample_351_v4
+    data_df = data_df.groupby('PATIENT_ID').last()
+    # data_df = data_df.iloc[:,1:]
+    # data_df = data_df.set_index(['PATIENT_ID'])
+    # data_df['年龄'] = data_df['年龄'].apply(lambda x: x.replace('岁', '') if is_number(x.replace('岁', '')) else np.nan).astype(float)
+    # data_df['性别'] = data_df['性别'].map({'男': 1, '女': 2})
+    # data_df['护理->出院方式'] = data_df['护理->出院方式'].map({'治愈': 0,'好转': 0, '死亡': 1})
+    lable = data_df['出院方式'].values
+    data_df = data_df.drop(['出院方式', '入院时间', '出院时间'], axis=1)
+    data_df['Type2'] = lable
+    data_df = data_df.applymap(lambda x: x.replace('>', '').replace('<', '') if isinstance(x, str) else x)
+    data_df = data_df.applymap(lambda x: x if is_number(x) else -1)
+    # data_df = data_df.loc[:, data_df.isnull().mean() < 0.2]
+    data_df = data_df.astype(float)
+
+    return data_df
+    
+# path_train = 'analysis/data/raw_data/time_series_375_prerpocess.xlsx'  # to_ml
+# df = read_train_data(path_train)
+```
+
+```{r}
+View(py$df)
+```
+
+
+### fun:data_preprocess
+
+```{python}
+
+path_train = 'analysis/data/raw_data/time_series_375_prerpocess.xlsx'
+
+def data_preprocess(path_train):
+    data_df_unna = read_train_data(path_train)
+
+    # data_pre_df = pd.read_csv('./data/sample29_v3.csv',encoding='gbk')
+    data_pre_df = pd.read_excel('analysis/data/raw_data/time_series_test_110_preprocess.xlsx', index_col=[0, 1])
+    data_pre_df = merge_data_by_sliding_window(data_pre_df, n_days=1, dropna=True, subset=top3_feats_cols,
+                                                     time_form='diff')
+    data_pre_df = data_pre_df.groupby('PATIENT_ID').first().reset_index()
+    data_pre_df = data_pre_df.applymap(lambda x: x.replace('>', '').replace('<', '') if isinstance(x, str) else x)
+    data_pre_df = data_pre_df.drop_duplicates()
+
+    return data_df_unna, data_pre_df
+    
+# df1, df2 = data_preprocess(path_train)
+```
+
+```{r}
+# View(py$df1)
+# View(py$df2)
+```
+
+
+### fun: data_read_and_split
+
+```{python}
+### Data read and split
+def data_read_and_split(is_dropna=False,sub_cols=None):
+    # data_df_unna为375数据集，data_pre_df为110数据集
+    data_df_unna,data_pre_df = data_preprocess(path_train)
+    if is_dropna==True:
+        data_df_unna = data_df_unna.dropna(subset=sub_cols,how='any')
+
+    # 计算特征的缺失情况
+    col_miss_data = col_miss(data_df_unna)
+    # 计算特征缺失比例
+    col_miss_data['Missing_part'] = col_miss_data['missing_count']/len(data_df_unna)
+    # 选择缺失少于0.2的特征
+    sel_cols = col_miss_data[col_miss_data['Missing_part']<=0.2]['col']
+    # copy函数将选择的特征数据摘出来，不影响原数据的数值
+    data_df_sel = data_df_unna[sel_cols].copy()
+    # 计算所有特征
+    cols = list(data_df_sel.columns)
+    # 剔除年龄和性别
+    cols.remove('年龄')
+    cols.remove('性别')
+    cols.remove('Type2')
+    cols.append('Type2')
+    # 构造剔除上述特征的dataframe
+    data_df_sel2 = data_df_sel[cols]
+    # 新建一个dataframe
+    data_df_unna = pd.DataFrame()
+    # 类似copy方法，新建变量，修改不会影响原数值
+    data_df_unna = data_df_sel2
+
+    # 对缺失数值添-1
+    data_df_unna = data_df_unna.fillna(-1)
+
+    # 取出特征名，从第一列到倒数第二列
+    x_col = cols[:-1]
+    #print(x_col)
+    # 取出标签名
+    y_col = cols[-1]
+    #取出375特征数据
+    X_data = data_df_unna[x_col]#.values
+    #取出375标签数据
+    Y_data = data_df_unna[y_col]#.values
+
+    return X_data,Y_data,x_col
+
+```
+
+### fun: col_miss
+
+```{python}
+## calculate miss values by col
+def col_miss(train_df):
+    col_missing_df = train_df.isnull().sum(axis=0).reset_index()
+    col_missing_df.columns = ['col','missing_count']
+    col_missing_df = col_missing_df.sort_values(by='missing_count')
+    return col_missing_df
+```
+
+### fun: show_confusion_matrix
+
+```{python}
+######################
+## Plot functions
+######################
+def show_confusion_matrix(validations, predictions):
+    LABELS = ['Survival','Death']
+    matrix = metrics.confusion_matrix(validations, predictions)
+    # plt.figure(dpi=400,figsize=(4.5, 3))
+    plt.figure(figsize=(4.5, 3))
+    sns.heatmap(matrix,
+                cmap='coolwarm',
+                linecolor='white',
+                linewidths=1,
+                xticklabels=LABELS,
+                yticklabels=LABELS,
+                annot=True,
+                fmt='d')
+    plt.title('Confusion Matrix')
+    plt.ylabel('True Label')
+    plt.xlabel('Predicted Label')
+    plt.show()
+```
+
+### fun: plot_roc
+
+```{python}
+def plot_roc(labels, predict_prob,Moodel_name_i,fig,labels_name,k):
+    false_positive_rate,true_positive_rate,thresholds=roc_curve(labels, predict_prob)
+    roc_auc=auc(false_positive_rate, true_positive_rate)
+    #plt.figure()
+    line_list = ['--','-']
+    ax = fig.add_subplot(111)
+    plt.title('ROC', fontsize=20)
+    ax.plot(false_positive_rate, true_positive_rate,line_list[k%2],linewidth=1+(1-k/5),label=Moodel_name_i+' AUC = %0.4f'% roc_auc)
+    plt.xticks(fontsize=20)
+    plt.yticks(fontsize=20)
+    plt.ylabel('TPR', fontsize=20)
+    plt.xlabel('FPR', fontsize=20)
+    labels_name.append(Moodel_name_i+' AUC = %0.4f'% roc_auc)
+    #plt.show()
+    return labels_name
+
+```
+
+### fun: ceate_feature_map
+
+```{python}
+def ceate_feature_map(features):
+    outfile = open('xgb.fmap', 'w')
+    i = 0
+    for feat in features:
+        outfile.write('{0}\t{1}\tq\n'.format(i, feat))
+        i = i + 1
+    outfile.close()
+```
+
+### fun: plot_decision_boundary
+
+```{python}
+def plot_decision_boundary(model, x_tr, y_tr):
+    """画出决策边界和样本点
+
+    :param model: 输入 XGBoost 模型
+    :param x_tr: 训练集样本
+    :param y_tr: 训练集标签
+    :return: None
+    """
+    # x_ss = StandardScaler().fit_transform(x_tr)
+    # x_2d = PCA(n_components=2).fit_transform(x_ss)
+
+    coord1_min = x_tr[:, 0].min() - 1
+    coord1_max = x_tr[:, 0].max() + 1
+    coord2_min = x_tr[:, 1].min() - 1
+    coord2_max = x_tr[:, 1].max() + 1
+
+    coord1, coord2 = np.meshgrid(
+        np.linspace(coord1_min, coord1_max, int((coord1_max - coord1_min) * 30)).reshape(-1, 1),
+        np.linspace(coord2_min, coord2_max, int((coord2_max - coord2_min) * 30)).reshape(-1, 1),
+    )
+    coord = np.c_[coord1.ravel(), coord2.ravel()]
+
+    category = model.predict(coord).reshape(coord1.shape)
+    # prob = model.predict_proba(coord)[:, 1]
+    # category = (prob > 0.99).astype(int).reshape(coord1.shape)
+
+    dir_save = './decision_boundary'
+    os.makedirs(dir_save, exist_ok=True)
+
+    # Figure
+    plt.close('all')
+    plt.figure(figsize=(7, 7))
+    custom_cmap = ListedColormap(['#EF9A9A', '#90CAF9'])
+    plt.contourf(coord1, coord2, category, cmap=custom_cmap)
+    plt.savefig(pjoin(dir_save, 'decision_boundary1.png'), bbox_inches='tight')
+    plt.scatter(x_tr[y_tr == 0, 0], x_tr[y_tr == 0, 1], c='yellow', label='Survival', s=30, alpha=1, edgecolor='k')
+    plt.scatter(x_tr[y_tr == 1, 0], x_tr[y_tr == 1, 1], c='palegreen', label='Death', s=30, alpha=1, edgecolor='k')
+    plt.ylabel('Lymphocytes (%)')
+    plt.xlabel('Lactate dehydrogenase')
+    plt.legend()
+    # plt.savefig(pjoin(dir_save, 'decision_boundary2.png'), dpi=500, bbox_inches='tight')
+    plt.show()
+
+```
+
+### fun:
+
+```{python}
+def plot_3D_fig(X_data):
+    cols = ['乳酸脱氢酶','淋巴细胞(%)','超敏C反应蛋白']
+    X_data = X_data.dropna(subset=cols,how='all')
+    col = 'Type2'
+    data_df_sel2_0 = X_data[X_data[col]==0]
+    data_df_sel2_1 = X_data[X_data[col]==1]
+    
+    # fig = plt.figure(dpi=400,figsize=(10, 4))
+    fig = plt.figure(figsize=(10, 4))
+    ax = fig.add_subplot(111, projection='3d')
+    i= 2;j= 0;k= 1; # 120 201
+    ax.scatter(data_df_sel2_0[cols[i]], data_df_sel2_0[cols[j]], data_df_sel2_0[cols[k]], c=data_df_sel2_0[col],cmap='Blues_r',label='Cured', linewidth=0.5)
+    ax.scatter(data_df_sel2_1[cols[i]], data_df_sel2_1[cols[j]], data_df_sel2_1[cols[k]], c=data_df_sel2_1[col], cmap='gist_rainbow_r',label='Death',marker='x', linewidth=0.5)
+ 
+    cols_en = ['Lactate dehydrogenase','Lymphocyte(%)','High-sensitivity C-reactive protein','Type of Survival(0) or Death(1)']
+    ax.set_zlabel(cols_en[k])  # 坐标轴
+    ax.set_ylabel(cols_en[j])
+    ax.set_xlabel(cols_en[i])
+    fig.legend(['Survival','Death'],loc='upper center')
+    # plt.savefig('./picture_2class/3D_data_'+str(i)+str(j)+str(k)+'_v6.png')
+    plt.show()
+```
+
+
+```{python}
+### is_number in the read data
+def is_number(s):
+    if s is None:
+        s = np.nan
+
+    try:
+        float(s)
+        return True
+    except ValueError:
+        pass
+
+    try:
+        import unicodedata
+        unicodedata.numeric(s)
+        return True
+    except (TypeError, ValueError):
+        pass
+
+    return False
+```
+
+
+## Main_of_features_selection
+
+### setup
+
+```{python}
+# -- coding:utf-8 --
+import pandas as pd
+import numpy as np
+
+#from utils_features_selection import *
+# 自定义的所有函数
+
+from xgboost import plot_tree
+
+from sklearn import linear_model
+from sklearn.ensemble import RandomForestClassifier
+from sklearn import tree
+
+```
+
+### fun: features_selection
+```{python}
+## features selection part
+def features_selection():
+    ## 读取375的数据
+    X_data_all_features,Y_data,x_col = data_read_and_split()
+    # name_dict = {'乳酸脱氢酶':'Lactate dehydrogenase (LDH)','淋巴细胞(%)':'Lymphocytes(%)','超敏C反应蛋白':'High-sensitivity C-reactive protein (hs-CRP)',
+    #          '钠':'Sodium','氯':'Chlorine','国际标准化比值':'International Normalized Ratio (INR)','嗜酸细胞(#)':'Eosinophils(#)',
+    #          '嗜酸细胞(%)':'Eosinophils(%)','单核细胞(%)':'Monocytes(%)','白蛋白':'Albumin'}
+    #
+    # 构建一个dataframe用于存储特征的重要程度信息
+    import_feature = pd.DataFrame()
+    import_feature['col'] = x_col
+    import_feature['xgb'] = 0
+    # 重复100次试验
+    for i in range(100): # 50,150
+        #每次试验将375数据随机划分0.7训练集和0.3测试集，注意随机random_state=i
+        ## 注明：此方法原因是由于可获得的样本量较少，为了产生不同的训练样本集，使得特征的重要度排序更为稳定，从而选择了这样一种方式。
+        ## 通过每次不同的随机种子产生不同的样本，从而达到一定程度上的抑制少量样本的异常对特征的重要度带来的影响。
+        x_train, x_test, y_train, y_test = train_test_split(X_data_all_features, Y_data, test_size=0.3, random_state=i)
+        #定义模型超参数
+        model = xgb.XGBClassifier(
+                max_depth=4
+                ,learning_rate=0.2
+                ,reg_lambda=1
+                ,n_estimators=150
+                ,subsample = 0.9
+                ,colsample_bytree = 0.9)
+        #模型拟合
+        model.fit(x_train, y_train)
+        #累加特征重要程度
+        import_feature['xgb'] = import_feature['xgb']+model.feature_importances_/100
+    # 按照特征重要程度，降序排列
+    import_feature = import_feature.sort_values(axis=0, ascending=False, by='xgb')
+    print('Top 10 features:')
+    print(import_feature.head(10))
+    # Sort feature importances from GBC model trained earlier
+    # 按照特征重要程度的位置信息
+    indices = np.argsort(import_feature['xgb'].values)[::-1]
+    #获取前10个重要的特征位置
+    Num_f = 10
+    indices = indices[:Num_f]
+    
+    # Visualise these with a barplot
+    # plt.subplots(dpi=400,figsize=(12, 10))
+    plt.subplots(figsize=(12, 10))
+    # g = sns.barplot(y=list(name_dict.values())[:Num_f], x = import_feature.iloc[:Num_f]['xgb'].values[indices], orient='h') #import_feature.iloc[:Num_f]['col'].values[indices]
+    g = sns.barplot(y=import_feature.iloc[:Num_f]['col'].values[indices], x = import_feature.iloc[:Num_f]['xgb'].values[indices], orient='h') #import_feature.iloc[:Num_f]['col'].values[indices]
+    g.set_xlabel("Relative importance",fontsize=18)
+    g.set_ylabel("Features",fontsize=18)
+    g.tick_params(labelsize=14)
+    sns.despine() 
+    # plt.savefig('feature_importances_v3.png')
+    plt.show()
+    # g.set_title("The mean feature importance of XGB models");
+    # 获取前10重要特征的重要性数值
+    import_feature_cols= import_feature['col'].values[:10]
+
+    # 画特征金字塔
+    num_i = 1
+    val_score_old = 0
+    val_score_new = 0
+    while val_score_new >= val_score_old:
+        val_score_old = val_score_new
+        # 按重要程度顺序取特种
+        x_col = import_feature_cols[:num_i]
+        print(x_col)
+        X_data = X_data_all_features[x_col]#.values
+        ## 交叉验证
+        print('5-Fold CV:')
+        acc_train, acc_val, acc_train_std, acc_val_std = StratifiedKFold_func_with_features_sel(X_data.values,Y_data.values)
+        print("Train AUC-score is %.4f ; Validation AUC-score is %.4f" % (acc_train,acc_val))
+        print("Train AUC-score-std is %.4f ; Validation AUC-score-std is %.4f" % (acc_train_std,acc_val_std))
+        val_score_new = acc_val
+        num_i += 1
+        
+    print('Selected features:',x_col[:-1])
+    
+    return list(x_col[:-1])
+```
+
+
+### fun: single_tree
+
+```{python}
+def single_tree(cols=['乳酸脱氢酶','淋巴细胞(%)','超敏C反应蛋白']):
+    print('single_tree:\n')
+    #获取375病人（data_df_unna） 和110病人（data_pre_df）数据
+    data_df_unna,data_pre_df = data_preprocess()
+    #去掉全空行，此时375总数目变成351
+    data_df_unna = data_df_unna.dropna(subset=cols,how='any')
+
+    cols.append('Type2')
+    #获取病人的结局标签
+    Tets_Y = data_pre_df.reset_index()[['PATIENT_ID','出院方式']].copy()
+    #修改dataframe的名字
+    Tets_Y = Tets_Y.rename(columns={'PATIENT_ID': 'ID', '出院方式': 'Y'})
+    # 获取110病人的标签数据
+    y_true = Tets_Y['Y'].values
+
+    x_col = cols[:-1]
+    y_col = cols[-1]
+    # 获取351病人的三特征数据
+    x_np = data_df_unna[x_col].values
+    # 获取351病人的标签数据
+    y_np = data_df_unna[y_col].values
+    # 获取110病人的三特征数据
+    x_test = data_pre_df[x_col].values
+    # 在351病人上划分训练集和验证集，此时110视为测试集
+    X_train, X_val, y_train, y_val = train_test_split(x_np, y_np, test_size=0.3, random_state=6)
+    #限定单树xgb模型
+    model = xgb.XGBClassifier(
+        max_depth=3,
+        n_estimators=1,
+    )
+    model.fit(X_train,y_train)
+
+    #训练集混淆矩阵
+    pred_train = model.predict(X_train)
+    show_confusion_matrix(y_train, pred_train)
+    print(classification_report(y_train, pred_train))
+
+    #验证集混淆矩阵
+    pred_val = model.predict(X_val)
+    show_confusion_matrix(y_val, pred_val)
+    print(classification_report(y_val, pred_val))
+    #测试集混淆矩阵
+    
+    pred_test = model.predict(x_test)
+    print('True test label:',y_true)
+    print('Predict test label:',pred_test.astype('int32'))
+    show_confusion_matrix(y_true, pred_test)
+    print(classification_report(y_true, pred_test))
+    
+    plt.figure(dpi=300,figsize=(8,6))
+    plot_tree(model)
+    plt.show()
+    
+    graph = xgb.to_graphviz(model)
+    graph.render(filename='single-tree.dot')
+    #单树可视化
+    #ceate_feature_map(cols[:-1])
+    #graph = xgb.to_graphviz(model, fmap='xgb.fmap', num_trees=0, **{'size': str(10)})
+    #graph.render(filename='single-tree.dot')
+
+```
+
+
+
+```{python}
+def Compare_with_other_method(sub_cols=['乳酸脱氢酶','淋巴细胞(%)','超敏C反应蛋白']):
+    # 读取351数据集（从375中删除sub_cols全为空的样本得到）
+    x_np,y_np,x_col = data_read_and_split(is_dropna=True,sub_cols=sub_cols)
+
+    #为了si的图4说明问题。如果是5折，画不出SI 图4
+    X_train, X_val, y_train, y_val = train_test_split(x_np, y_np, test_size=0.3, random_state=6)
+
+    #定义全特征下的比对方法
+    xgb_n_clf = xgb.XGBClassifier(
+        max_depth=4
+        ,learning_rate=0.2
+        ,reg_lambda=1
+        ,n_estimators=150
+        ,subsample = 0.9
+        ,colsample_bytree = 0.9
+        ,random_state=0)
+    tree_clf = tree.DecisionTreeClassifier(random_state=0,max_depth=4) #random_state=0,之前没加
+    RF_clf1 = RandomForestClassifier(random_state=0,n_estimators=150,max_depth=4,)
+    LR_clf = linear_model.LogisticRegression(random_state=0,C=1,solver='lbfgs')
+    LR_reg_clf = linear_model.LogisticRegression(random_state=0,C=0.1, solver='lbfgs')
+    
+    fig = plt.figure(dpi=400,figsize=(16, 8))
+
+    Num_iter = 100
+    
+    i = 0
+    labels_names = []
+    Moodel_name = ['Multi-tree XGBoost with all features',
+                   'Decision tree with all features',
+                   'Random Forest with all features',
+                   'Logistic regression with all features with regularization parameter = 1 (by default)',
+                   'Logistic regression with all features with regularization parameter = 10',]
+    for model in [xgb_n_clf,tree_clf,RF_clf1,LR_clf,LR_reg_clf]:
+        print('Model:'+Moodel_name[i])
+        #以f1的评价方式来k折
+        acc_train, acc_val, acc_train_std, acc_val_std = StratifiedKFold_func(x_np.values, y_np.values,Num_iter,model, score_type ='f1')
+        #print('F1-score of Train:%.6f with std:%.4f \nF1-score of Validation:%.4f with std:%.6f '%(acc_train,acc_train_std,acc_val,acc_val_std))
+        # 以auc的评价方式来k折
+        acc_train, acc_val, acc_train_std, acc_val_std = StratifiedKFold_func(x_np.values, y_np.values,Num_iter,model, score_type ='auc')
+        print('AUC of Train:%.6f with std:%.4f \nAUC of Validation:%.6f with std:%.4f '%(acc_train,acc_train_std,acc_val,acc_val_std))
+
+        #为了画si图4
+        model.fit(X_train,y_train)
+        pred_train_probe = model.predict_proba(X_train)[:,1]
+        pred_val_probe = model.predict_proba(X_val)[:,1]
+        #plot_roc(y_val, pred_val_probe,Moodel_name[i],fig,labels_names,i) # 为了画si图4中的test
+        plot_roc(y_train, pred_train_probe,Moodel_name[i],fig,labels_names,i) # 为了画si图4 train
+        print('AUC socre:',roc_auc_score(y_val, pred_val_probe))
+        
+        i = i+1
+
+    ## 三特征的单树模型对比
+    x_np_sel = x_np[sub_cols] #选择三特征
+    ## 划分数据集是为了单树的单次训练并生成AUC图，划分方式和之前保存一致。
+    X_train, X_val, y_train, y_val = train_test_split(x_np_sel, y_np, test_size=0.3, random_state=6) 
+
+    #为了三特征的模型对比
+    xgb_clf = xgb.XGBClassifier(
+        max_depth=3,
+        n_estimators=1,
+        random_state=0,
+    )
+    
+    tree_clf = tree.DecisionTreeClassifier(random_state=0,max_depth=3)
+    RF_clf2 = RandomForestClassifier(random_state=0,n_estimators=1,max_depth=3,)
+
+    #i = 0
+    Moodel_name = ['Single-tree XGBoost with three features',
+                   'Decision tree with three features',
+                   'Random Forest with a single tree constraint with three features',]
+    for model in [xgb_clf,tree_clf,RF_clf2]:
+        print('Model'+Moodel_name[i-5])
+        #f1的结果
+        acc_train, acc_val, acc_train_std, acc_val_std = StratifiedKFold_func(x_np_sel.values, y_np.values,Num_iter,model, score_type ='f1')
+        #print('F1-score of Train:%.6f with std:%.4f \nF1-score of Validation:%.4f with std:%.6f '%(acc_train,acc_train_std,acc_val,acc_val_std))
+        #auc的结果
+        acc_train, acc_val, acc_train_std, acc_val_std = StratifiedKFold_func(x_np_sel.values, y_np.values,Num_iter,model, score_type ='auc')
+        print('AUC of Train:%.6f with std:%.4f \nAUC of Validation:%.6f with std:%.4f '%(acc_train,acc_train_std,acc_val,acc_val_std))
+        
+        model.fit(X_train,y_train)
+        pred_train_probe = model.predict_proba(X_train)[:,1]    # 为了画si图4中的train
+        pred_val_probe = model.predict_proba(X_val)[:,1]    # 为了画si图4中的test
+        #plot_roc(y_val, pred_val_probe,Moodel_name[i-5],fig,labels_names,i) # 为了画si图4中的test
+        plot_roc(y_train, pred_train_probe,Moodel_name[i-5],fig,labels_names,i)# 为了画si图4中的train
+        print('AUC socre:',roc_auc_score(y_val, pred_val_probe))
+        
+        i = i+1
+    
+    plt.plot([0,1],[0,1],'r--')
+    plt.legend(loc='SouthEastOutside', fontsize=14)
+    plt.savefig('AUC_train.png')
+    plt.show()
+
+if __name__ == '__main__':
+    
+    ## 特征筛选
+    selected_cols = features_selection()
+    single_tree()
+    ## Compare Method
+    print('Compare with other methods')    
+    Compare_with_other_method(selected_cols)
+```
+
+## EDA
+
+```{python}
+# -- coding:utf-8 --
+import xgboost as xgb
+import numpy as np
+import pandas as pd
+from sklearn import metrics
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+from sklearn.metrics import f1_score, precision_score, recall_score
+
+import utils
+import warnings
+
+warnings.filterwarnings("ignore")
+
+font = {
+    'family': 'Tahoma',
+    'size': 20
+}
+```
+
+### predicted_time_horizon
+
+```{python}
+def predicted_time_horizon(train_file, test_file):
+    """
+    分布图——提前预测时长,对应正文的Figure 3中的B C
+
+    孙川  2020.04.02
+    """
+    #读取375和110的病人数据，并限定特征为['乳酸脱氢酶', '超敏C反应蛋白', '淋巴细胞(%)', '出院时间', '出院方式']
+    data1 = pd.read_parquet(train_file)[['乳酸脱氢酶', '超敏C反应蛋白', '淋巴细胞(%)', '出院时间', '出院方式']]
+    data2 = pd.read_parquet(test_file)[['乳酸脱氢酶', '超敏C反应蛋白', '淋巴细胞(%)', '出院时间', '出院方式']]
+    #for 循环，分别画正文Figure 3的图B，即375+110=485的图；和图C 110病人的图
+    for data in [utils.concat_data(data1, data2), data2]:
+        # 将3特征存在缺省的样本删掉
+        data = data.dropna(how='all', subset=['乳酸脱氢酶', '超敏C反应蛋白', '淋巴细胞(%)'])
+
+        # 滑窗合并数据
+        data = utils.merge_data_by_sliding_window(data, n_days=1, dropna=True, subset=utils.top3_feats_cols, time_form='diff')
+        # 根据一级（PATINET_ID）和二级索引（距离出院的时间）排序
+        data = data.sort_index(level=(0, 1))
+
+        # 调用apply方法对每个样本进行判断 即 论文决策树预测
+        data['pred'] = data.apply(utils.decision_tree, axis=1)
+
+        # 统计提前预测时长
+        time_advance = utils.get_time_in_advance_of_predict(data)['time_advance']
+
+        # Figure
+        plt.figure(dpi=200)
+        plt.hist(time_advance, bins=100)
+        plt.title('Predicted time horizon', fontdict=font)
+        plt.xticks(fontsize=font['size'])
+        plt.yticks(fontsize=font['size'])
+        plt.xlabel('days to outcome', fontdict=font)
+        plt.ylabel('Frequency', fontdict=font)
+        x_max = plt.gca().get_xlim()[1]
+        y_max = plt.gca().get_ylim()[1]
+        plt.text(0.65 * x_max, 0.75 * y_max, f"mean {np.mean(time_advance):.2f}\nstd     {np.std(time_advance):.2f}", fontdict=font)
+        plt.show()
+
+```
+
+
+```{python}
+train_file = 'analysis/data/derived_data/time_series_375.csv'
+test_file = 'analysis/data/derived_data/time_series_test_110.csv'
+
+predicted_time_horizon(train_file, test_file)
+```
+
+
+### hospitalization_time
+
+```{python}
+def hospitalization_time():
+    """
+    统计 375 + 110 住院时长
+
+    孙川 2020.04.21
+    """
+    data375 = (
+        pd.read_excel('data/time_series_375_prerpocess.xlsx', index_col=[0, 1])
+        .groupby('PATIENT_ID')[['入院时间', '出院时间']].last()
+    )
+    data110 = (
+        pd.read_excel('data/time_series_test_110_preprocess.xlsx', index_col=[0, 1])
+        .groupby('PATIENT_ID')[['入院时间', '出院时间']].last()
+    )
+    data485 = data375.append(data110, ignore_index=True)
+
+    duration = data485['出院时间'] - data485['入院时间']
+
+
+    print(f"患者数目：{len(duration)}")
+    print(f"最短住院时长：{duration.min()}")
+    print(f"最长住院时长：{duration.max()}")
+    print(f"住院时长中位数：{duration.median()}")
+```
+
+
+### show_confusion_matrix
+
+```{python}
+def show_confusion_matrix(validations, predictions, path='confusion.png'):
+    """
+    绘制混淆矩阵
+
+    郭裕祺  2020.04.02
+    """
+    LABELS = ['Survival', 'Death']
+    matrix = metrics.confusion_matrix(validations, predictions)
+    plt.figure(figsize=(6, 4))
+    sns.heatmap(matrix,
+                cmap='coolwarm',
+                linecolor='white',
+                linewidths=1,
+                xticklabels=LABELS,
+                yticklabels=LABELS,
+                annot=True,
+                fmt='d')
+    plt.title('Confusion Matrix')
+    plt.ylabel('True Label')
+    plt.xlabel('Predicted Label')
+    plt.savefig(path, dpi=500, bbox_inches='tight')
+    plt.show()
+```
+
+
+### ceate_feature_map
+
+```{python}
+def ceate_feature_map(features):
+    """
+    可视化单树时，构造特征名对应的fmap
+
+    郭裕祺  2020.04.02
+    """
+    outfile = open('xgb.fmap', 'w')
+    i = 0
+    for feat in features:
+        outfile.write('{0}\t{1}\tq\n'.format(i, feat))
+        i = i + 1
+    outfile.close()
+```
+
+### compute_f1_all
+
+```{python}
+def compute_f1_all(data, features, days=10):
+    """
+    计算每个时间段的f1 score
+
+    郭裕祺  2020.04.02
+    """
+    day_list = list(range(0, days + 1))
+    sample_num = []
+    survival_num = []
+    death_num = []
+    f1 = []
+    precision = []
+    recall = []
+    add_before_f1 = []
+    for i in range(0, days + 1):
+        if i == 0:
+            # 有的病人出院或死亡后的几个小时最后一次检测才会出来
+            # data_subset第i天的数据
+            data_subset = data.loc[data['t_diff'] <= 0].groupby('PATIENT_ID').last()
+            data_subset_sum = data.loc[data['t_diff'] <= 0]
+        else:
+            # data_subset是<=i的数据
+            data_subset = data.loc[data['t_diff'] == i].groupby('PATIENT_ID').last()
+            data_subset_sum = data.loc[data['t_diff'] <= i]
+        # 统计对应子集的结果
+        if data_subset.shape[0] > 0:
+            sample_num.append(data_subset.shape[0])
+            survival_num.append(sum(data_subset['出院方式'] == 0))
+            death_num.append(sum(data_subset['出院方式'] == 1))
+            pred = data_subset[features].apply(utils.decision_tree, axis=1)
+
+            f1.append(f1_score(data_subset['出院方式'].values, pred, average='macro'))
+            precision.append(precision_score(data_subset['出院方式'].values, pred))
+
+            recall.append(recall_score(data_subset['出院方式'].values, pred))
+
+            add_before_f1.append(f1_score(data_subset_sum['出院方式'].values,
+                                          data_subset_sum[features].apply(utils.decision_tree, axis=1),
+                                          average='macro'))
+
+        else:
+            sample_num.append(np.nan)
+            survival_num.append(np.nan)
+            death_num.append(np.nan)
+            f1.append(np.nan)
+            precision.append(np.nan)
+            recall.append(np.nan)
+            add_before_f1.append(np.nan)
+    return day_list, f1, precision, recall, sample_num, survival_num, death_num, add_before_f1
+
+```
+
+
+### plot_f1_time_single_tree
+
+```{python}
+def plot_f1_time_single_tree(data, features, path='image/f1_score_time.png'):
+    """
+    绘制论文中单树在不同时间段数据上的f1 score
+
+    郭裕祺  2020.04.04
+    """
+    test_model_result = pd.DataFrame()
+    test_model_result['day'], test_model_result['f1-score'], test_model_result['precision-score'], \
+    test_model_result['recall-score'], test_model_result['sample_num'], test_model_result['survival_num'], \
+    test_model_result['death_num'], test_model_result['add_before_f1'] = compute_f1_all(data, features, days=18)
+    # 画f1-时间曲线
+    fig = plt.figure(figsize=(8, 6))
+    plt.tick_params(labelsize=20)
+    ax = fig.add_subplot(111)
+    ax2 = ax.twinx()
+    n1 = ax.bar(test_model_result['day'], test_model_result['sample_num'], label='Death', color='red', alpha=0.5
+                , zorder=0)
+    n2 = ax.bar(test_model_result['day'], test_model_result['survival_num'], label='Survival', color='lightgreen',
+                alpha=1, zorder=5)
+    p1 = ax2.plot(test_model_result['day'], test_model_result['f1-score'], marker='o', linestyle='-', color='black',
+                  label='f1 score', zorder=10)
+
+    p2 = ax2.plot(test_model_result['day'], test_model_result['add_before_f1'], marker='o', linestyle='-', color='blue',
+                  label='cumulative f1 score', zorder=10)
+
+    fig.legend(loc='center left', bbox_to_anchor=(1.1, 0.95), bbox_transform=ax.transAxes, fontsize=14)
+
+    ax.set_xlabel('days to outcome', fontsize=20)
+    ax2.set_ylabel('f1-score(macro avg)', fontsize=20)
+    ax.set_ylabel('sample_num', fontsize=20)
+    plt.tick_params(labelsize=20)
+    plt.xticks(list(range(0, 19, 2)))
+    plt.savefig(path, dpi=500, bbox_inches='tight')
+    plt.show()
+
+```
+
+### plot_f1_time_single_tree_test_train
+
+```{python}
+def plot_f1_time_single_tree_test_train():
+    """
+    绘制论文中单树在训练集测试集不同时间段数据上的f1 score
+    对应正文figure3 中DE
+
+    郭裕祺  2020.04.04
+    """
+    features = ['乳酸脱氢酶', '超敏C反应蛋白', '淋巴细胞(%)']
+    data1 = pd.read_parquet('data/time_series_375.parquet')[['乳酸脱氢酶', '超敏C反应蛋白', '淋巴细胞(%)', '出院时间', '出院方式']]
+    data2 = pd.read_parquet('data/time_series_test_110.parquet')[['乳酸脱氢酶', '超敏C反应蛋白', '淋巴细胞(%)', '出院时间', '出院方式']]
+    data = data1.append(data2)
+    # 滑窗合并数据
+    data = utils.merge_data_by_sliding_window(data, n_days=1, dropna=True, time_form='diff')
+    data = data.sort_index(level=(0, 1), ascending=True)
+    data = data.reset_index()
+    data = data.dropna(how='all', subset=['乳酸脱氢酶', '超敏C反应蛋白', '淋巴细胞(%)'])
+
+    data2 = utils.merge_data_by_sliding_window(data2, n_days=1, dropna=True, time_form='diff')
+    data2 = data2.sort_index(level=(0, 1), ascending=True)
+    data2 = data2.reset_index()
+    data2 = data2.dropna(how='all', subset=['乳酸脱氢酶', '超敏C反应蛋白', '淋巴细胞(%)'])
+
+
+    # 训练集+验证集+测试集的结果
+    plot_f1_time_single_tree(data, features, path='image/f1_time_train_test.png')
+
+    # 测试集结果
+    plot_f1_time_single_tree(data2, features, path='image/f1_time_test.png')
+
+```
+
+
+### decision_tree_top3_feats_predict_result
+
+```{python}
+def decision_tree_top3_feats_predict_result():
+    """
+    用所有次的 ['乳酸脱氢酶', '超敏C反应蛋白', '淋巴细胞(%)'] 进行预测
+
+    孙川  2020.04.07
+    """
+    # 决定是否使用每个病人最后一天的数据
+    last_sample = False
+
+    data1 = pd.read_parquet('data/time_series_375.parquet')[['乳酸脱氢酶', '超敏C反应蛋白', '淋巴细胞(%)', '出院时间', '出院方式']]
+    data2 = pd.read_parquet('data/time_series_test_110.parquet')[['乳酸脱氢酶', '超敏C反应蛋白', '淋巴细胞(%)', '出院时间', '出院方式']]
+
+    # data1是375 data2是110 concat是485
+    for data in [data1, data2, utils.concat_data(data1, data2)]:
+        # 滑窗合并数据
+        data = utils.merge_data_by_sliding_window(data, n_days=1, dropna=True, subset=utils.top3_feats_cols, time_form='diff')
+
+        #是否使用最后一次的数据，因为merge_data_by_sliding_window中last自带升序因此这里取first()
+        #groupby后，每个病人的索引是二级索引t_diff，是升序
+        if last_sample:
+            data = data.groupby('PATIENT_ID').first()
+
+        # 论文决策树预测
+        data['pred'] = data.apply(utils.decision_tree, axis=1)
+
+        # 调用自己写的结果统计方式utils.Metrics
+        metrics = utils.Metrics(acc='overall', f1='overall', conf_mat='overall',report='overall')
+        metrics.record(data['出院方式'], data['pred'])
+        metrics.print_metrics()
+
+```
+
+
+
+## question
+
+这些数据长啥样? 处理之后变成啥样?
+
