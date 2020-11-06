@@ -25,3 +25,5 @@ Suggests1:
 Suggests2:
     testthat,
     git2r
+URL: https://github.com/jixing475/drakeClinModel
+BugReports: https://github.com/jixing475/drakeClinModel/issues
